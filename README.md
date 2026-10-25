@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml/badge.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Lsh0x/petri-net/blob/main/LICENSE)
+
 **Generic places, transitions, tokens and markings for Rust.**
 
 A small, synchronous data model for **state-machine Petri nets**.
@@ -60,7 +62,61 @@ assert!(marking.tokens_in(&pending).is_empty());
 assert!(net.enabled_transitions(&marking).is_empty());
 ```
 
-Run the checked-in example with `cargo run --example workflow`.
+Run the sequential example with `cargo run --example workflow`.
+
+## Example: payment and packing in parallel
+
+An order can be packed while its payment is being processed. Shipping must wait
+for **both** tasks to finish for that same order.
+
+```mermaid
+flowchart TD
+    received(("Order received")) --> split["Split tasks · application"]
+    split --> payment(("Payment pending"))
+    split --> packing(("Packing pending"))
+    payment --> charge["take_payment"]
+    packing --> pack["pack_order"]
+    charge --> paid(("Paid"))
+    pack --> packed(("Packed"))
+    paid --> barrier["Wait for both · application"]
+    packed --> barrier
+    barrier --> shipped(("Shipped"))
+```
+
+Circles represent places. `take_payment` and `pack_order` are core transitions.
+The split and AND barrier are application code, explicitly demonstrated in
+[`examples/parallel_order.rs`](examples/parallel_order.rs).
+
+1. Insert one order token in `received`.
+2. The application consumes it and creates two tokens with the same order
+   number: one in `payment_pending`, one in `packing_pending`.
+3. Both transitions are enabled. Each branch advances independently, in either
+   order. The core itself does not spawn threads or execute external tasks.
+4. After packing finishes, shipping is still blocked if payment is pending.
+5. Once both completion tokens exist for the same order, the application
+   consumes them and inserts one token in `shipped`.
+
+```sh
+cargo run --example parallel_order
+```
+
+Expected output:
+
+```text
+Order 1001: payment and packing are both enabled.
+Packed, but payment is pending: shipping is blocked.
+Paid and packed: branch tokens consumed, order shipped once.
+```
+
+The example checks the intermediate markings and tests that different orders
+cannot satisfy each other's barrier. It is a single-process demonstration with
+caller-managed token IDs. In a real concurrent application, perform the split
+and barrier under one lock or transaction and allocate unique token IDs.
+
+**Two outgoing transitions from one place do not create parallel tasks.** With
+one token they are alternatives: moving that token takes only one path. This
+example creates two tokens explicitly. Native multi-input/multi-output firing
+would require a richer transition model than the current `from`/`to` API.
 
 ## Bring your own data
 
@@ -162,30 +218,26 @@ RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 cargo run --example workflow
 ```
 
-CI follows the checks used by
-[rankfusion](https://github.com/Lsh0x/rankfusion), adapted to this crate:
-formatting, Clippy, tests, rustdoc, dependency checks and LLVM coverage.
+CI enforces formatting, Clippy, tests, executable examples, rustdoc,
+dependency advisories and license/source checks, plus LLVM coverage.
 LCOV is saved as a workflow artifact. Codecov uploads use the optional
 `CODECOV_TOKEN` secret and do not block CI if the upload fails.
-
-Dependency auditing covers advisories, duplicate versions and allowed sources.
-License auditing will be enabled once a project license is selected.
 There are no benchmark targets or feature combinations to test yet.
 
 ## Releases
 
-Release-plz is configured for release pull requests, changelog updates,
-semantic-version checks, tags and GitHub releases. Both jobs remain disabled
-until the repository variable `ENABLE_RELEASES` is set to `true`.
+Release-plz runs on pushes to `main` and can also be started manually from
+GitHub Actions. It manages release pull requests, changelogs, semantic-version
+checks, publication to crates.io, tags and GitHub releases.
 
-Before enabling releases:
+Publishing requires a scoped `CARGO_REGISTRY_TOKEN` repository secret with
+permission to publish this crate. The workflow fails with an explicit message
+if the secret is missing. The crate name must be available on crates.io, or the
+token's owner must own the existing crate.
 
-1. Select a license and add its files and Cargo package metadata.
-2. Confirm the crate name is available on crates.io.
-3. Add a scoped `CARGO_REGISTRY_TOKEN` repository secret.
-4. Enable **Allow GitHub Actions to create and approve pull requests** in the
-   repository's Actions settings.
+For release pull requests, enable **Allow GitHub Actions to create and approve
+pull requests** in the repository's Actions settings.
 
 ## License
 
-A license has not yet been selected. Publication remains disabled.
+Licensed under the [MIT License](https://github.com/Lsh0x/petri-net/blob/main/LICENSE).

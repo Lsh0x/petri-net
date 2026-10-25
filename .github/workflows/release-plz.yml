@@ -7,10 +7,10 @@ permissions:
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   release-plz-release:
-    if: vars.ENABLE_RELEASES == 'true'
     name: Release-plz release
     runs-on: ubuntu-latest
     steps:
@@ -18,6 +18,14 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
+      - name: Check crates.io credentials
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [ -z "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "::error::Add the CARGO_REGISTRY_TOKEN repository secret to publish to crates.io."
+            exit 1
+          fi
       - uses: release-plz/action@v0.5
         with:
           command: release
@@ -26,7 +34,6 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   release-plz-pr:
-    if: vars.ENABLE_RELEASES == 'true'
     name: Release-plz PR
     runs-on: ubuntu-latest
     concurrency:
