@@ -3,360 +3,343 @@
 [![CI](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml/badge.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/petri-core.svg)](https://crates.io/crates/petri-core)
 [![docs.rs](https://docs.rs/petri-core/badge.svg)](https://docs.rs/petri-core)
-[![Coverage gate: 95% minimum](https://img.shields.io/badge/coverage_gate-%E2%89%A595%25-brightgreen.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
+[![Coverage gate](https://img.shields.io/badge/coverage_gate-%E2%89%A595%25-brightgreen.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Lsh0x/petri-net/blob/main/LICENSE)
 
-**Generic places, transitions, tokens and markings for Rust.**
+**Numeric Petri workflows with authenticated tokens, native forks/joins and
+atomic state transitions over storage you provide.**
 
-A small, synchronous data model for **state-machine Petri nets**.
-Attach your own metadata to places, transitions and tokens, inspect enabled
-transitions, and move tokens explicitly.
-
-> Initial development: the package is named `petri-core`, while this repository
-> is named `petri-net`. Version `0.1.0` is available on crates.io.
+The `engine` module adds the execution guarantees discussed below. The original
+root-level `Place`, `Transition`, `Token`, `Marking` and `Definition` types remain
+plain data models for compatibility; they do **not** acquire engine security
+properties. Use `petri_core::engine::*` for the new API. `Petri` is also
+re-exported at the crate root.
 
 ## Installation
 
-Add the crate to your application:
+The engine is introduced in version 0.2. Until that release is available, use Git:
 
 ```toml
 [dependencies]
-petri-core = "0.1"
+petri-core = { git = "https://github.com/Lsh0x/petri-net" }
+serde_json = "1"
+# The example uses futures' executor; production can use an existing runtime.
+futures = { version = "0.3", features = ["executor"] }
 ```
 
-The Rust import is `petri_core`. Serde support is always enabled; there are
-currently no optional feature flags.
+Enable `features = ["tiercache"]` for optional immutable snapshot archiving.
+The library has no executor requirement of its own. No MSRV is claimed yet.
 
-## What it does
+## Definition, marking and token
 
-The core stores the net's definition and current marking. Your application
-provides the domain meaning: a place might represent a workflow stage, a
-transition an allowed action, and a token an individual job.
+| Component | Meaning |
+| --- | --- |
+| `Definition` | Versioned numeric places, initial place, weighted transitions; exportable as JSON |
+| `Snapshot` | Authenticated current marking and revision of one execution |
+| `Token` | Authenticated run, position, unique token ID, fork context, parents and JSON payload |
+| `Petri<S>` | Validates transitions, creates descendants and commits via storage CAS |
+| `Storage` | Authoritative per-run load and atomic compare-and-swap |
+| `Authenticator` | HMAC-SHA-256 secret used by trusted engines |
 
-Each transition connects **one source place to one destination place**.
-It is enabled when its source contains at least one token. Querying enabled
-transitions is pure: it neither consumes tokens nor evaluates application rules.
+Place and transition IDs are `u32`, run IDs are caller-assigned `u128`, token IDs
+and revisions are `u64`. The state is a collection of active tokens, not a
+single bitmask: several tokens may occupy the same place.
 
-This is the state-machine subset of Petri nets. Multi-input joins, multi-output
-forks, weighted arcs and automatic firing are outside the current API.
+For a selected set of input tokens, execution applies:
 
-## Quick start
+$$M' = M - I_t + O_t$$
 
-```rust
-use petri_core::{Definition, Marking, Place, Token, Transition};
-
-let net = Definition::new(
-    vec![Place::new("pending", ()), Place::new("done", ())],
-    vec![Transition::new("complete", "pending", "done", ())],
-);
-
-let pending = "pending".to_string();
-let done = "done".to_string();
-let mut marking = Marking::new();
-marking.put_token(pending.clone(), Token::new(1, pending.clone(), "job-001"));
-
-assert_eq!(net.enabled_transitions(&marking)[0].id, "complete");
-
-let moved = marking.move_token(&pending, done.clone(), 1).unwrap();
-assert_eq!(moved.data, "job-001");
-assert_eq!(moved.place_id, done);
-assert!(marking.tokens_in(&pending).is_empty());
-assert!(net.enabled_transitions(&marking).is_empty());
-```
-
-Run the sequential example with `cargo run --example workflow`.
+`granted` checks the input multiset, authenticity, active membership and shared
+fork context. `execute` repeats these checks, removes the selected inputs,
+creates the outputs and atomically commits revision `r + 1` only if storage is
+still at `r`. All validation happens before committing. A conflict is returned;
+the crate does not silently retry business operations.
 
 ## Example: payment and packing in parallel
 
-An order can be packed while its payment is being processed. Shipping must wait
-for **both** tasks to finish for that same order.
-
 ```mermaid
 flowchart TD
-    received(("Order received")) --> split["Split tasks · application"]
-    split --> payment(("Payment pending"))
-    split --> packing(("Packing pending"))
-    payment --> charge["take_payment"]
-    packing --> pack["pack_order"]
-    charge --> paid(("Paid"))
-    pack --> packed(("Packed"))
-    paid --> barrier["Wait for both · application"]
-    packed --> barrier
-    barrier --> shipped(("Shipped"))
+    received(("0 · Received")) --> fork["0 · Fork"]
+    fork --> payment(("1 · Payment pending"))
+    fork --> packing(("2 · Packing pending"))
+    payment --> pay["1 · Complete payment"]
+    packing --> pack["2 · Complete packing"]
+    pay --> paid(("3 · Paid"))
+    pack --> packed(("4 · Packed"))
+    paid --> join["3 · Join and ship"]
+    packed --> join
+    join --> shipped(("5 · Shipped"))
 ```
 
-Circles represent places. `take_payment` and `pack_order` are core transitions.
-The split and AND barrier are application code, explicitly demonstrated in
-[`examples/parallel_order.rs`](examples/parallel_order.rs).
-
-1. Insert one order token in `received`.
-2. The application consumes it and creates two tokens with the same order
-   number: one in `payment_pending`, one in `packing_pending`.
-3. Both transitions are enabled. Each branch advances independently, in either
-   order. The core itself does not spawn threads or execute external tasks.
-4. After packing finishes, shipping is still blocked if payment is pending.
-5. Once both completion tokens exist for the same order, the application
-   consumes them and inserts one token in `shipped`.
-
-The complete implementation below corresponds to the diagram. Copy it into
-`src/main.rs` of an application depending on `petri-core`, or run the example
-already included in this repository.
+Here the fork and join are native transitions. The full runnable code below
+uses two engine instances sharing storage, transports a token as JSON and shows
+that shipping is refused until both branches have finished.
 
 ```rust
-use petri_core::{Definition, Marking, Place, Token, Transition};
+use petri_core::engine::{Arc, Authenticator, Definition, MemoryStorage, Petri, Token, Transition};
+use serde_json::json;
+use std::sync::Arc as Shared;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Order {
-    number: u64,
-}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    futures::executor::block_on(async {
+        // Numeric places: received=0, payment=1, packing=2, paid=3, packed=4,
+        // shipped=5. Numeric transitions: split=0, pay=1, pack=2, ship=3.
+        let definition = Definition::new(
+            vec![0, 1, 2, 3, 4, 5],
+            0,
+            vec![
+                Transition::new(
+                    0,
+                    vec![Arc::new(0, 1)],
+                    vec![Arc::new(1, 1), Arc::new(2, 1)],
+                ),
+                Transition::new(1, vec![Arc::new(1, 1)], vec![Arc::new(3, 1)]),
+                Transition::new(2, vec![Arc::new(2, 1)], vec![Arc::new(4, 1)]),
+                Transition::new(
+                    3,
+                    vec![Arc::new(3, 1), Arc::new(4, 1)],
+                    vec![Arc::new(5, 1)],
+                ),
+            ],
+        )?;
+        let storage = Shared::new(MemoryStorage::new());
+        // Demo only. Provision a random secret securely in real deployments.
+        let auth = Shared::new(Authenticator::new([7; 32]));
+        let p = Petri::new(definition.clone(), storage.clone(), auth.clone())?;
+        let q = Petri::new(
+            Definition::from_json(&definition.to_json()?)?,
+            storage,
+            auth,
+        )?;
 
-fn complete(net: &Definition, marking: &mut Marking<Order>, transition: &str, token: u64) {
-    let transition = net.transition(transition).expect("known transition");
-    assert!(net.enabled_transitions(marking).contains(&transition));
-    marking
-        .move_token(&transition.from, transition.to.clone(), token)
-        .expect("token at source");
-}
+        let root = p.start(1001, json!({"order": 1001})).await?;
+        let branches = p
+            .execute(1001, 0, &[root], vec![json!("payment"), json!("packing")])
+            .await?;
+        let payment = Token::from_json(&branches[0].to_json()?)?;
+        q.granted(1001, 1, std::slice::from_ref(&payment)).await?;
+        // The payment service does its business work before recording completion.
+        let paid = q
+            .execute(1001, 1, &[payment], vec![json!({"paid": true})])
+            .await?;
+        assert!(p.granted(1001, 3, &paid).await.is_err());
+        println!("Paid, but packing is pending: shipping is blocked.");
 
-// Application-level AND barrier: both branches must finish for the same order.
-fn try_ship(marking: &mut Marking<Order>, order: &Order) -> bool {
-    let paid = "paid".to_string();
-    let packed = "packed".to_string();
-    let payment = marking.tokens_in(&paid).iter().find(|t| &t.data == order);
-    let packing = marking.tokens_in(&packed).iter().find(|t| &t.data == order);
-    let (Some(payment), Some(packing)) = (payment, packing) else {
-        return false;
-    };
-    let (payment_id, packing_id) = (payment.id, packing.id);
-    marking.remove_token(&paid, payment_id).unwrap();
-    marking.remove_token(&packed, packing_id).unwrap();
-    marking.put_token("shipped".into(), Token::new(4, "shipped", order.clone()));
-    true
-}
-
-fn main() {
-    let net = Definition::new(
-        [
-            "received",
-            "payment_pending",
-            "packing_pending",
-            "paid",
-            "packed",
-            "shipped",
-        ]
-        .into_iter()
-        .map(|id| Place::new(id, ()))
-        .collect(),
-        vec![
-            Transition::new("take_payment", "payment_pending", "paid", ()),
-            Transition::new("pack_order", "packing_pending", "packed", ()),
-        ],
-    );
-    let order = Order { number: 1001 };
-    let mut marking = Marking::new();
-    marking.put_token("received".into(), Token::new(1, "received", order.clone()));
-
-    // Application-level split: consume the received order, create two tasks.
-    let received = marking.remove_token(&"received".into(), 1).unwrap();
-    marking.put_token(
-        "payment_pending".into(),
-        Token::new(2, "payment_pending", received.data.clone()),
-    );
-    marking.put_token(
-        "packing_pending".into(),
-        Token::new(3, "packing_pending", received.data),
-    );
-    assert_eq!(net.enabled_transitions(&marking).len(), 2);
-    println!("Order 1001: payment and packing are both enabled.");
-
-    // Packing can finish before payment. These steps may complete in either order.
-    complete(&net, &mut marking, "pack_order", 3);
-    assert!(!try_ship(&mut marking, &order));
-    assert_eq!(marking.tokens_in(&"packed".into()).len(), 1);
-    println!("Packed, but payment is pending: shipping is blocked.");
-
-    complete(&net, &mut marking, "take_payment", 2);
-    assert!(try_ship(&mut marking, &order));
-    assert!(marking.tokens_in(&"paid".into()).is_empty());
-    assert!(marking.tokens_in(&"packed".into()).is_empty());
-    assert_eq!(marking.tokens_in(&"shipped".into())[0].data, order);
-    assert!(!try_ship(&mut marking, &order));
-    println!("Paid and packed: branch tokens consumed, order shipped once.");
+        let packed = p
+            .execute(1001, 2, &branches[1..], vec![json!({"packed": true})])
+            .await?;
+        let shipped = q
+            .execute(
+                1001,
+                3,
+                &[paid, packed].concat(),
+                vec![json!({"shipped": true})],
+            )
+            .await?;
+        assert_eq!(shipped[0].place(), 5);
+        assert!(shipped[0].scope().is_empty());
+        let snapshot = p.snapshot(1001).await?;
+        assert_eq!(snapshot.tokens(), shipped.as_slice());
+        assert_eq!(snapshot.revision(), 4);
+        println!("Native join consumed both branch tokens. Run 1001 is at revision 4.");
+        Ok(())
+    })
 }
 ```
 
-```sh
-cargo run --example parallel_order
-```
+Run it with `cargo run --example authenticated_workflow`.
 
-Expected output:
+## Forks, joins, choices, weights and loops
 
-```text
-Order 1001: payment and packing are both enabled.
-Packed, but payment is pending: shipping is blocked.
-Paid and packed: branch tokens consumed, order shipped once.
-```
+- A transition consumes the exact weights listed in its input arcs. The caller
+  explicitly selects tokens; missing, extra, duplicate, cross-run or consumed
+  inputs are rejected. Duplicate places in an arc list are rejected; use weights.
+- Multiple output tokens create a fresh fork occurrence and append it to each
+  output's scope stack. Output payloads follow arc order, then weight order.
+- A transition consuming multiple tokens requires identical complete scope
+  stacks, and closes one scope level. This handles structured AND joins,
+  including nested forks. A simultaneous join/fork closes then opens a scope.
+- Single-input/single-output transitions preserve scope. A loop creates fresh
+  token IDs; every fork traversal gets a fresh occurrence ID.
+- Choices are competing consumers of the same token. Only one can commit.
+- Sink transitions have empty outputs. Source transitions with no inputs are
+  rejected; `start` creates exactly one initial token per run.
 
-The example checks the intermediate markings and tests that different orders
-cannot satisfy each other's barrier. It is a single-process demonstration with
-caller-managed token IDs. In a real concurrent application, perform the split
-and barrier under one lock or transaction and allocate unique token IDs.
+This initial policy supports **structured fork/join correlation**. It is not a
+universal matching algorithm for unstructured nets, partial joins, arbitrary
+cross-scope joins or coloured guard languages. The definition is structurally
+validated, not formally proven sound or deadlock-free. Users must model balanced
+forks and joins. There are no timers, inhibitor/read arcs, priority scheduling,
+automatic token selection or execution reservations in this version.
 
-**Two outgoing transitions from one place do not create parallel tasks.** With
-one token they are alternatives: moving that token takes only one path. This
-example creates two tokens explicitly. Native multi-input/multi-output firing
-would require a richer transition model than the current `from`/`to` API.
+## Authenticity and trust boundary
 
-## Bring your own data
+Tokens and snapshots carry separate domain-separated HMAC-SHA-256 tags over
+versioned serialized claims. Claims include the exact definition's SHA-256 hash,
+run identity and the full payload. Snapshots additionally authenticate the
+revision, allocation counters and all active tokens. Token verification uses
+the HMAC crate's tag verification method rather than ordinary byte equality.
 
-The three payload types are independent and default to `()`:
+Keys are supplied as 32 bytes, never included in exports and not exposed through
+`Debug`. Provision a cryptographically random secret through your normal secret
+management. The fixed example key is for demonstrations only. Every holder of
+the HMAC secret can issue valid claims: this is shared-secret authentication,
+**not** a public-key signature scheme or proof against a compromised engine.
+Key rotation and public-key verification are not implemented yet.
+
+`verify_token` proves authenticity and model binding. `granted` additionally
+checks current availability using authoritative storage. A correctly
+authenticated old token remains cryptographically valid after consumption, but
+cannot execute again against the current marking.
+
+The engine validates declared workflow progression. Services are responsible
+for business work and for constructing output data. A MAC does not attest that
+a payment actually happened, and a successful advisory `granted` does not
+reserve inputs. Concurrent business effects require application idempotency.
+Only the marking transition has the atomic single-consumption guarantee.
+
+## Bring authoritative storage
 
 ```rust
-use petri_core::{Place, Token, Transition};
+use petri_core::engine::{BoxFuture, DefinitionHash, Result, RunId, Snapshot, Storage};
 
-struct Stage {
-    label: String,
+struct DatabaseStore;
+
+impl Storage for DatabaseStore {
+    fn load(&self, definition: DefinitionHash, run: RunId)
+        -> BoxFuture<'_, Result<Option<Snapshot>>>
+    {
+        // Use an authoritative read; propagate database errors.
+        Box::pin(async move { todo!("read execution by (definition, run)") })
+    }
+
+    fn compare_and_swap(
+        &self, definition: DefinitionHash, run: RunId,
+        expected: Option<u64>, next: Snapshot,
+    ) -> BoxFuture<'_, Result<()>> {
+        // None: atomic insert-if-absent. Some(r): update only revision r.
+        // Revision comparison and write MUST be one database operation.
+        Box::pin(async move { todo!("transactional CAS; conflicts return Error::Conflict") })
+    }
 }
-
-let pending = Place::new("pending", Stage { label: "Pending review".into() });
-let approve = Transition::new("approve", "pending", "approved", "reviewer");
-let job = Token::new(42, pending.id.clone(), vec!["document.pdf"]);
-
-assert_eq!(pending.data.label, "Pending review");
-assert_eq!(approve.data, "reviewer");
-assert_eq!(job.data, vec!["document.pdf"]);
 ```
 
-Payloads need no trait bounds for construction, insertion, removal or queries.
-Cloning, equality, hashing and serialization require the corresponding traits
-on the payload when those operations are used. `move_token` requires
-`D: Clone` because it returns a snapshot while retaining the moved token.
+The backend must supply linearizable per-run reads and atomic CAS. For a SQL
+backend, use a unique `(definition_hash, run_id)` key and a conditional update
+with `WHERE revision = expected`; zero updated rows means a conflict. Never
+implement CAS as an unprotected `get` followed by `put`.
 
-## Core API
+`MemoryStorage` implements this contract under a mutex for engines sharing the
+same `Arc`. It is neither durable nor shared across processes. No SQL/Redis
+backend ships yet. Retain completed runs or tombstones and never reuse a run ID.
+A storage/network error after a possibly committed write requires reconciliation
+against current state; do not assume that the operation failed to commit.
 
-| Type | Responsibility |
-| --- | --- |
-| `Place<P = ()>` | String ID and place metadata |
-| `Transition<T = ()>` | String ID, source, destination and transition metadata |
-| `Token<D = ()>` | Caller-assigned `u64` ID, place ID and payload |
-| `Marking<D = ()>` | Tokens grouped by place |
-| `Definition<P = (), T = ()>` | Places, transitions and lookup/query methods |
-
-`PlaceId` and `TransId` are aliases for `String`. All types are re-exported at
-the crate root and remain available in their respective modules.
-
-### Markings
-
-| Method | Behavior |
-| --- | --- |
-| `tokens_in(&place)` | Returns a borrowed slice, empty for an unknown place |
-| `put_token(place, token)` | Inserts a token and normalizes its `place_id` |
-| `remove_token(&place, id)` | Removes the first matching token, or returns `None` |
-| `move_token(&from, to, id)` | Moves a token and returns its snapshot, or `None` |
-
-Removing the last token also removes the empty bucket. A missing token leaves
-the marking unchanged, and moving a token to its existing place is supported.
-
-### Definitions
-
-`place(id)` and `transition(id)` return the first matching definition.
-`enabled_transitions(&marking)` returns borrowed transitions in definition order.
-
-Moving a token is a marking operation: it does not look up a transition or
-check whether the move is allowed by a definition. Perform domain checks in
-your application before moving it.
-
-## Serialization
-
-All model types derive Serde's `Serialize` and `Deserialize`.
-For JSON, add `serde_json` to your application:
+## Export, import and recovery
 
 ```rust
-use petri_core::{Marking, Token};
+# use petri_core::engine::*;
+# use std::sync::Arc as Shared;
+# futures::executor::block_on(async {
+# let definition = Definition::new(vec![0], 0, vec![])?;
+# let auth = Shared::new(Authenticator::new([7; 32]));
+# let p = Petri::new(definition.clone(), Shared::new(MemoryStorage::new()), auth.clone())?;
+# p.start(42, serde_json::Value::Null).await?;
+let definition_json = p.definition().to_json()?;
+let snapshot_json = p.snapshot(42).await?.to_json()?;
 
-let mut marking = Marking::new();
-marking.put_token("pending".into(), Token::new(1, "pending", "job-001"));
-
-let json = serde_json::to_string(&marking).unwrap();
-let restored: Marking<String> = serde_json::from_str(&json).unwrap();
-assert_eq!(restored.tokens_in(&"pending".into())[0].data, "job-001");
+let recovered = Petri::new(
+    Definition::from_json(&definition_json)?,
+    Shared::new(MemoryStorage::new()),
+    auth, // Provisioned separately, never extracted from JSON.
+)?;
+let snapshot = Snapshot::from_json(&snapshot_json)?;
+recovered.restore(snapshot).await?;
+# Ok::<(), petri_core::engine::Error>(())
+# }).unwrap();
 ```
 
-## Current guarantees and limits
+Definitions validate graph structure on import. Token/snapshot deserialization
+alone does not verify authenticity. `restore` verifies the snapshot and token
+consistency, then inserts only if that run is absent. It cannot overwrite a
+newer marking. The serialized format rejects unknown fields and uses schema
+version 1; changing a definition changes its identity. There is no automatic
+migration between graph versions.
 
-- Token IDs are managed by the caller; uniqueness is not enforced.
-- Definitions accept duplicate IDs and dangling transition endpoints.
-- Markings accept places that are absent from a definition.
-- Deserialization assumes consistent input; it does not validate token bucket
-  keys against each token's `place_id`.
-- Source occupancy is the only enabling condition. Guards, permissions,
-  capacity, deadlines, persistence and scheduling belong to the application.
-- No minimum supported Rust version is claimed yet. CI uses stable Rust.
+**Authenticity is not freshness:** an old authenticated snapshot can be restored
+into an empty backend. Disaster recovery must use a trusted latest checkpoint,
+preserve run history/tombstones and stop the old authority before switching.
+Independent restored copies do not coordinate. The engine cannot protect
+against an authoritative store that deliberately rolls state back.
 
-These constraints keep this first version aligned with a generic data model;
-applications must validate untrusted definitions and markings before using them.
+Definitions, snapshots and transported tokens have a 4 MiB JSON limit. Each run
+is limited to 4096 active tokens; per-transition input/output weights are bounded
+by that limit. Counters use checked arithmetic and reject exhaustion. Enforce
+request-size limits before network buffering/deserialization as well.
 
-## Development
+## Optional tiercache integration
+
+`tiercache` is useful for immutable revision archives, but its `CacheStore`
+trait has no atomic CAS and reads may use stale levels. Therefore it is not an
+implementation of authoritative `Storage`.
+
+```rust
+# #[cfg(feature = "tiercache")] {
+# use petri_core::engine::*;
+# use std::sync::Arc as Shared;
+# futures::executor::block_on(async {
+# let p = Petri::new(Definition::new(vec![0], 0, vec![])?, Shared::new(MemoryStorage::new()), Shared::new(Authenticator::new([7;32])))?;
+# p.start(42, serde_json::Value::Null).await?;
+let cache = tiercache::Cache::new(vec![Box::new(tiercache::Lru::new(1024))]);
+let archived = p.archive(42, &cache).await?;
+let same_revision = p.read_archive(42, archived.revision(), &cache).await?;
+assert_eq!(same_revision, Some(archived));
+# Ok::<(), petri_core::engine::Error>(())
+# }).unwrap();
+# }
+```
+
+Keys include the definition hash, run ID and revision. `archive` loads current
+state from the authoritative backend before caching. `read_archive` authenticates
+and checks the requested identity/revision, but returns historical data. Cache
+misses, write failures or corrupted entries cannot authorize an execution;
+`granted` and `execute` always consult `Storage`.
+
+## Tests and development
 
 ```sh
 cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo test --doc --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
-cargo run --example workflow
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo test --locked --no-default-features --all-targets
+cargo test --locked --doc --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps --all-features
+cargo run --locked --example authenticated_workflow
 ```
 
-CI enforces formatting, Clippy, tests, executable examples, rustdoc,
-dependency advisories and license/source checks, plus LLVM coverage.
-LCOV is saved as a workflow artifact. Codecov uploads use the optional
-`CODECOV_TOKEN` secret and do not block CI if the upload fails.
-There are no benchmark targets or feature combinations to test yet.
+Tests cover weighted forks/joins, nested contexts, loops, sinks, malformed
+imports, tampered identity/state/data, wrong secrets and graphs, stale-token
+replay, failed-store propagation, counter/size limits and snapshot recovery.
+A barrier-based two-thread test forces both engines to read the same revision
+and verifies exactly one commit. Property tests exercise run IDs, payloads and
+completion order, alongside the legacy marking's random reference-model tests.
 
-## Tests and coverage
+CI checks both feature configurations, dependencies/licenses, examples and
+coverage. Source line coverage must stay at least 95%. The `coverage` artifact
+contains an HTML report, LCOV and a summary. Coverage is execution evidence, not
+a security audit or a proof that every input has been tested.
 
-The suite includes **30 tests** (24 deterministic core tests, four property tests,
-and two parallel-workflow example tests), plus four executable documentation
-examples. Each property test runs 256 generated cases per invocation.
+## Compatibility and releases
 
-Coverage includes missing tokens and buckets, duplicate IDs, self-moves,
-empty/Unicode/long IDs, `u64::MAX`, non-clone payloads, clone isolation,
-malformed JSON, documented permissive deserialization, and a 10,000-token case.
-Random operation sequences are compared with an independent flat-list model;
-after each operation every bucket and token count must agree. Separate
-properties verify serialization, failed-operation atomicity and enabling rules.
+The original data-model API remains available; see
+[legacy model examples](https://github.com/Lsh0x/petri-net/blob/main/docs/legacy-model.md).
+Its public mutable fields and unverified serde data must not be used as engine
+credentials. The engine intentionally uses separate numeric and opaque types.
 
-Measured source coverage is **100% of lines, functions and regions** with stable
-Rust and `cargo-llvm-cov`. This measures executed code, not all possible inputs;
-LLVM branch coverage is not enabled. Tests explicitly preserve current API
-semantics, including acceptance of duplicate IDs and unchecked definitions.
-
-```sh
-cargo install cargo-llvm-cov --locked
-rustup component add llvm-tools-preview
-cargo llvm-cov --locked --tests --all-features --workspace --no-report
-cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --summary-only --fail-under-lines 95
-cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --html --output-dir coverage
-```
-
-CI fails below **95% source line coverage**. The `coverage` Actions artifact
-contains LCOV, a text summary and an HTML report; coverage excludes test and
-example source files. The example tests still run in the regular test job.
-
-## Releases
-
-Release-plz runs on pushes to `main` and can also be started manually from
-GitHub Actions. It manages release pull requests, changelogs, semantic-version
-checks, publication to crates.io, tags and GitHub releases.
-
-Publishing requires a scoped `CARGO_REGISTRY_TOKEN` repository secret with
-permission to publish this crate. The workflow fails with an explicit message
-if the secret is missing. The crate name must be available on crates.io, or the
-token's owner must own the existing crate.
-
-For release pull requests, enable **Allow GitHub Actions to create and approve
-pull requests** in the repository's Actions settings.
+Release-plz runs after successful CI on `main` (or manual dispatch). Publication
+uses `CARGO_REGISTRY_TOKEN`; release PRs require GitHub Actions PR creation to be
+enabled. The engine is introduced as version 0.2.0.
 
 ## License
 
-Licensed under the [MIT License](https://github.com/Lsh0x/petri-net/blob/main/LICENSE).
+[MIT](https://github.com/Lsh0x/petri-net/blob/main/LICENSE).

@@ -11,3 +11,8 @@ pub use marking::Marking;
 pub use place::{Place, PlaceId};
 pub use token::Token;
 pub use transition::{TransId, Transition};
+
+/// Authenticated numeric workflow engine, separate from the legacy data model.
+pub mod engine;
+
+pub use engine::Petri;
