@@ -1,7 +1,9 @@
 # petri-core
 
 [![CI](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml/badge.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
-
+[![crates.io](https://img.shields.io/crates/v/petri-core.svg)](https://crates.io/crates/petri-core)
+[![docs.rs](https://docs.rs/petri-core/badge.svg)](https://docs.rs/petri-core)
+[![Coverage gate: 95% minimum](https://img.shields.io/badge/coverage_gate-%E2%89%A595%25-brightgreen.svg)](https://github.com/Lsh0x/petri-net/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Lsh0x/petri-net/blob/main/LICENSE)
 
 **Generic places, transitions, tokens and markings for Rust.**
