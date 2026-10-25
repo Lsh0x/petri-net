@@ -1,6 +1,6 @@
 [package]
 name = "petri-core"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "MIT"
 description = "Generic places, transitions, tokens and markings for state-machine Petri nets"
