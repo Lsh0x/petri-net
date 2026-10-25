@@ -72,11 +72,27 @@ jobs:
         with:
           components: llvm-tools-preview
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --locked --all-features --workspace --lcov --output-path lcov.info
+      - name: Instrument and run core tests
+        run: cargo llvm-cov --locked --tests --all-features --workspace --no-report
+      - name: Enforce 95% core line coverage
+        run: |
+          set -o pipefail
+          cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --summary-only --fail-under-lines 95 | tee coverage-summary.txt
+          echo '### Core coverage (src/ only)' >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Export LCOV and browsable HTML
+        run: |
+          cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --lcov --output-path lcov.info
+          cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --html --output-dir coverage
       - uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: lcov.info
+          path: |
+            lcov.info
+            coverage-summary.txt
+            coverage/
       - uses: codecov/codecov-action@v7
         with:
           files: lcov.info

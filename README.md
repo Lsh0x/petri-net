@@ -311,6 +311,36 @@ LCOV is saved as a workflow artifact. Codecov uploads use the optional
 `CODECOV_TOKEN` secret and do not block CI if the upload fails.
 There are no benchmark targets or feature combinations to test yet.
 
+## Tests and coverage
+
+The suite includes **30 tests** (24 deterministic core tests, four property tests,
+and two parallel-workflow example tests), plus four executable documentation
+examples. Each property test runs 256 generated cases per invocation.
+
+Coverage includes missing tokens and buckets, duplicate IDs, self-moves,
+empty/Unicode/long IDs, `u64::MAX`, non-clone payloads, clone isolation,
+malformed JSON, documented permissive deserialization, and a 10,000-token case.
+Random operation sequences are compared with an independent flat-list model;
+after each operation every bucket and token count must agree. Separate
+properties verify serialization, failed-operation atomicity and enabling rules.
+
+Measured source coverage is **100% of lines, functions and regions** with stable
+Rust and `cargo-llvm-cov`. This measures executed code, not all possible inputs;
+LLVM branch coverage is not enabled. Tests explicitly preserve current API
+semantics, including acceptance of duplicate IDs and unchecked definitions.
+
+```sh
+cargo install cargo-llvm-cov --locked
+rustup component add llvm-tools-preview
+cargo llvm-cov --locked --tests --all-features --workspace --no-report
+cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --summary-only --fail-under-lines 95
+cargo llvm-cov report --ignore-filename-regex '/(tests|examples)/' --html --output-dir coverage
+```
+
+CI fails below **95% source line coverage**. The `coverage` Actions artifact
+contains LCOV, a text summary and an HTML report; coverage excludes test and
+example source files. The example tests still run in the regular test job.
+
 ## Releases
 
 Release-plz runs on pushes to `main` and can also be started manually from
