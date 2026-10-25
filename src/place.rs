@@ -11,6 +11,9 @@ pub struct Place<P = ()> {
 
 impl<P> Place<P> {
     pub fn new(id: impl Into<PlaceId>, data: P) -> Self {
-        Self { id: id.into(), data }
+        Self {
+            id: id.into(),
+            data,
+        }
     }
 }

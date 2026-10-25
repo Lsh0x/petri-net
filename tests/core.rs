@@ -29,7 +29,10 @@ fn move_preserves_payload_and_missing_move_changes_nothing() {
 fn enabling_is_a_pure_source_occupancy_query() {
     let net = Definition::new(
         vec![Place::new("a", ()), Place::new("b", ())],
-        vec![Transition::new("ab", "a", "b", ()), Transition::new("ba", "b", "a", ())],
+        vec![
+            Transition::new("ab", "a", "b", ()),
+            Transition::new("ba", "b", "a", ()),
+        ],
     );
     let mut marking = Marking::new();
     assert!(net.enabled_transitions(&marking).is_empty());

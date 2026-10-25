@@ -21,7 +21,9 @@ impl<D> Default for Marking<D> {
 
 impl<D> Marking<D> {
     pub fn new() -> Self {
-        Self { tokens: HashMap::new() }
+        Self {
+            tokens: HashMap::new(),
+        }
     }
 
     pub fn tokens_in(&self, place: &PlaceId) -> &[Token<D>] {

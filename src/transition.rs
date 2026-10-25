@@ -20,6 +20,11 @@ impl<T> Transition<T> {
         to: impl Into<PlaceId>,
         data: T,
     ) -> Self {
-        Self { id: id.into(), from: from.into(), to: to.into(), data }
+        Self {
+            id: id.into(),
+            from: from.into(),
+            to: to.into(),
+            data,
+        }
     }
 }

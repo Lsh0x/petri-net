@@ -12,6 +12,10 @@ pub struct Token<D = ()> {
 
 impl<D> Token<D> {
     pub fn new(id: u64, place_id: impl Into<PlaceId>, data: D) -> Self {
-        Self { id, place_id: place_id.into(), data }
+        Self {
+            id,
+            place_id: place_id.into(),
+            data,
+        }
     }
 }

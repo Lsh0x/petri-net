@@ -8,6 +8,8 @@ fn main() {
     let mut marking = Marking::new();
     marking.put_token("pending".into(), Token::new(1, "pending", "job"));
     assert_eq!(net.enabled_transitions(&marking).len(), 1);
-    marking.move_token(&"pending".into(), "done".into(), 1).unwrap();
+    marking
+        .move_token(&"pending".into(), "done".into(), 1)
+        .unwrap();
     assert!(net.enabled_transitions(&marking).is_empty());
 }

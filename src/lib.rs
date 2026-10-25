@@ -1,7 +1,5 @@
-//! Generic data model for state-machine Petri nets.
-//!
-//! Transitions have one source and one destination. Domain-specific rules,
-//! scheduling and transition execution belong in the consuming application.
+#![doc = include_str!("../README.md")]
+
 pub mod definition;
 pub mod marking;
 pub mod place;
