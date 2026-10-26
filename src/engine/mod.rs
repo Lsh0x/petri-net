@@ -93,6 +93,8 @@ pub struct Definition {
     places: Vec<PlaceId>,
     initial: PlaceId,
     transitions: Vec<Transition>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    dependency_graph: bool,
 }
 impl Definition {
     pub fn new(
@@ -105,9 +107,14 @@ impl Definition {
             places,
             initial,
             transitions,
+            dependency_graph: false,
         };
         value.validate()?;
         Ok(value)
+    }
+    pub(crate) fn for_dependency_graph(mut self) -> Self {
+        self.dependency_graph = true;
+        self
     }
     pub fn to_json(&self) -> Result<String> {
         encode_string(self)
@@ -307,29 +314,50 @@ impl<S: Storage> Petri<S> {
 
     /// Creates one initial token. Atomic insert rejects an already-used run ID.
     pub async fn start(&self, run: RunId, data: Value) -> Result<Token> {
-        let token = self.issue(Claims {
-            version: VERSION,
-            definition: self.hash,
-            run,
-            id: 0,
-            place: self.definition.initial,
-            scope: vec![],
-            parents: vec![],
-            data,
-        })?;
+        let mut tokens = self
+            .start_marking(run, vec![(self.definition.initial, data)])
+            .await?;
+        Ok(tokens.remove(0))
+    }
+
+    // Only the validated workflow compiler may create multiple root inputs.
+    pub(crate) async fn start_marking(
+        &self,
+        run: RunId,
+        entries: Vec<(PlaceId, Value)>,
+    ) -> Result<Vec<Token>> {
+        if entries.is_empty() || entries.len() > MAX_TOKENS {
+            return Err(Error::Limit);
+        }
+        let mut tokens = Vec::with_capacity(entries.len());
+        for (id, (place, data)) in entries.into_iter().enumerate() {
+            if !self.definition.places.contains(&place) {
+                return Err(Error::InvalidInputs);
+            }
+            tokens.push(self.issue(Claims {
+                version: VERSION,
+                definition: self.hash,
+                run,
+                id: id as u64,
+                place,
+                scope: vec![],
+                parents: vec![],
+                data,
+            })?);
+        }
         let snapshot = self.seal(State {
             version: VERSION,
             definition: self.hash,
             run,
             revision: 0,
-            next_token: 1,
+            next_token: tokens.len() as u64,
             next_scope: 1,
-            tokens: vec![token.clone()],
+            tokens: tokens.clone(),
         })?;
         self.storage
             .compare_and_swap(self.hash, run, None, snapshot)
             .await?;
-        Ok(token)
+        Ok(tokens)
     }
 
     /// Verifies authenticity and definition binding, not current availability.
@@ -433,10 +461,10 @@ impl<S: Storage> Petri<S> {
             return Err(Error::Limit);
         }
         state.revision = state.revision.checked_add(1).ok_or(Error::Limit)?;
-        if inputs.len() > 1 {
+        if !self.definition.dependency_graph && inputs.len() > 1 {
             scope.pop();
         }
-        if count > 1 {
+        if !self.definition.dependency_graph && count > 1 {
             scope.push(state.next_scope);
             state.next_scope = state.next_scope.checked_add(1).ok_or(Error::Limit)?;
         }
@@ -494,6 +522,9 @@ impl<S: Storage> Petri<S> {
             return Err(Error::InvalidInputs);
         }
         let scope = inputs[0].scope(); // Non-empty input arcs with positive weights.
+        if self.definition.dependency_graph {
+            return Ok((t, vec![]));
+        }
         if inputs.iter().any(|token| token.scope() != scope) {
             return Err(Error::IncompatibleScope);
         }
@@ -569,3 +600,7 @@ impl<S: Storage> Petri<S> {
 #[cfg(test)]
 #[path = "../../tests/support/engine_internal.rs"]
 mod tests;
+
+fn is_false(value: &bool) -> bool {
+    !value
+}

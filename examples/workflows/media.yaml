@@ -1,0 +1,34 @@
+Version: 1
+Tasks:
+  Extraction:
+    Id: 1
+  Texte:
+    Id: 2
+    DependsOn: Extraction
+  Images:
+    Id: 3
+    DependsOn: Extraction
+  Resume:
+    Id: 4
+    DependsOn: Texte
+  Classification:
+    Id: 5
+    DependsOn: Texte
+  OCR:
+    Id: 6
+    DependsOn: Images
+  Miniatures:
+    Id: 7
+    DependsOn: Images
+  Index:
+    Id: 8
+    DependsOn: [Resume, Classification, OCR]
+  Galerie:
+    Id: 9
+    DependsOn: [Miniatures, Classification]
+  Publication:
+    Id: 10
+    DependsOn: Index
+  Notification:
+    Id: 11
+    DependsOn: [Publication, Galerie]

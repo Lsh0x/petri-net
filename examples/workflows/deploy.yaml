@@ -1,0 +1,29 @@
+Version: 1
+Tasks:
+  Sources:
+    Id: 1
+  Configuration:
+    Id: 2
+  Secrets:
+    Id: 3
+  Compilation:
+    Id: 4
+    DependsOn: [Sources, Configuration]
+  Audit:
+    Id: 5
+    DependsOn: [Configuration, Secrets]
+  Tests:
+    Id: 6
+    DependsOn: Compilation
+  Archive:
+    Id: 7
+    DependsOn: Compilation
+  Validation:
+    Id: 8
+    DependsOn: [Tests, Audit]
+  Deploiement:
+    Id: 9
+    DependsOn: Validation
+  Rapport:
+    Id: 10
+    DependsOn: [Deploiement, Archive]

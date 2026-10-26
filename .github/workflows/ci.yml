@@ -44,6 +44,7 @@ jobs:
       - run: cargo run --locked --example workflow
       - run: cargo run --locked --example parallel_order
       - run: cargo run --locked --example authenticated_workflow
+      - run: cargo run --locked --example declarative_workflow
       - run: cargo test --locked --no-default-features --all-targets
 
   docs:

@@ -1,0 +1,25 @@
+Version: 1
+Tasks:
+  Commande:
+    Id: 1
+  Paiement:
+    Id: 2
+    DependsOn: Commande
+  Stock:
+    Id: 3
+    DependsOn: Commande
+  Adresse:
+    Id: 4
+    DependsOn: Commande
+  Facture:
+    Id: 5
+    DependsOn: Paiement
+  Preparation:
+    Id: 6
+    DependsOn: [Paiement, Stock]
+  Expedition:
+    Id: 7
+    DependsOn: [Preparation, Adresse]
+  Cloture:
+    Id: 8
+    DependsOn: [Expedition, Facture]

@@ -16,3 +16,7 @@ pub use transition::{TransId, Transition};
 pub mod engine;
 
 pub use engine::Petri;
+
+/// Declarative YAML/JSON dependency graphs compiled to authenticated Petri nets.
+pub mod workflow;
+pub use workflow::{Petri as WorkflowPetri, Workflow};
