@@ -21,3 +21,8 @@ unused-allowed-license = "allow"
 [[licenses.exceptions]]
 name = "subtle"
 allow = ["BSD-3-Clause"]
+
+# YAML's text-decoding dependency includes BSD-licensed encoding tables.
+[[licenses.exceptions]]
+name = "encoding_rs"
+allow = ["BSD-3-Clause"]

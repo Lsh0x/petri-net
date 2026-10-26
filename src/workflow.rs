@@ -120,7 +120,7 @@ impl Workflow {
     pub fn from_yaml(input: &str) -> Result<Self> {
         check_size(input)?;
         let input: Input =
-            serde_yaml_ng::from_str(input).map_err(|e| Error::Parse(e.to_string()))?;
+            serde_saphyr::from_str(input).map_err(|e| Error::Parse(e.to_string()))?;
         Self::validate(input)
     }
     pub fn from_json(input: &str) -> Result<Self> {
@@ -129,7 +129,7 @@ impl Workflow {
         Self::validate(input)
     }
     pub fn to_yaml(&self) -> Result<String> {
-        let result = serde_yaml_ng::to_string(self).map_err(|e| Error::Parse(e.to_string()))?;
+        let result = serde_saphyr::to_string(self).map_err(|e| Error::Parse(e.to_string()))?;
         check_size(&result)?;
         Ok(result)
     }
