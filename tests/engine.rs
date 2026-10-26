@@ -1,6 +1,6 @@
 use futures::executor::block_on;
 use petri_core::engine::*;
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::{Arc as Shared, Barrier};
 
 fn definition() -> Definition {
@@ -35,21 +35,13 @@ fn engine() -> Petri<MemoryStorage> {
     .unwrap()
 }
 async fn fork(p: &Petri<MemoryStorage>, run: u128) -> Vec<Token> {
-    let token = p.start(run, json!({"order": run as u64})).await.unwrap();
-    p.execute(run, 0, &[token], vec![json!("payment"), json!("packing")])
-        .await
-        .unwrap()
+    let token = p.start(run).await.unwrap();
+    p.execute(run, 0, &[token]).await.unwrap()
 }
 async fn done(p: &Petri<MemoryStorage>, run: u128) -> Vec<Token> {
     let branches = fork(p, run).await;
-    let a = p
-        .execute(run, 1, &branches[..1], vec![json!("paid")])
-        .await
-        .unwrap();
-    let b = p
-        .execute(run, 2, &branches[1..], vec![json!("packed")])
-        .await
-        .unwrap();
+    let a = p.execute(run, 1, &branches[..1]).await.unwrap();
+    let b = p.execute(run, 2, &branches[1..]).await.unwrap();
     [a, b].concat()
 }
 
@@ -60,30 +52,18 @@ fn fork_join_loop_and_sink_have_exact_markings_and_provenance() {
         let completed = done(&p, 1).await;
         assert_eq!(completed[0].scope(), completed[1].scope());
         assert_eq!(completed[0].scope().len(), 1);
-        let joined = p
-            .execute(1, 3, &completed, vec![json!("ready")])
-            .await
-            .unwrap();
+        let joined = p.execute(1, 3, &completed).await.unwrap();
         assert_eq!(joined[0].place(), 5);
         assert!(joined[0].scope().is_empty());
         assert_eq!(joined[0].parents(), &[3, 4]);
         assert_eq!(p.snapshot(1).await.unwrap().tokens(), joined.as_slice());
-        let root = p.execute(1, 4, &joined, vec![Value::Null]).await.unwrap();
-        let second = p.execute(1, 0, &root, vec![Value::Null; 2]).await.unwrap();
+        let root = p.execute(1, 4, &joined).await.unwrap();
+        let second = p.execute(1, 0, &root).await.unwrap();
         assert_ne!(second[0].scope(), completed[0].scope());
-        let a = p
-            .execute(1, 1, &second[..1], vec![Value::Null])
-            .await
-            .unwrap();
-        let b = p
-            .execute(1, 2, &second[1..], vec![Value::Null])
-            .await
-            .unwrap();
-        let joined = p
-            .execute(1, 3, &[a, b].concat(), vec![Value::Null])
-            .await
-            .unwrap();
-        assert!(p.execute(1, 5, &joined, vec![]).await.unwrap().is_empty());
+        let a = p.execute(1, 1, &second[..1]).await.unwrap();
+        let b = p.execute(1, 2, &second[1..]).await.unwrap();
+        let joined = p.execute(1, 3, &[a, b].concat()).await.unwrap();
+        assert!(p.execute(1, 5, &joined).await.unwrap().is_empty());
         assert!(p.snapshot(1).await.unwrap().tokens().is_empty());
     });
 }
@@ -104,7 +84,7 @@ fn two_services_recover_workflow_and_exchange_json_tokens() {
         let token = Token::from_json(&branches[0].to_json().unwrap()).unwrap();
         q.verify_token(&token).unwrap();
         q.granted(1, 1, std::slice::from_ref(&token)).await.unwrap();
-        q.execute(1, 1, &[token], vec![json!(42)]).await.unwrap();
+        q.execute(1, 1, &[token]).await.unwrap();
         assert_eq!(p.snapshot(1).await.unwrap().revision(), 2);
     });
 }
@@ -113,19 +93,14 @@ fn two_services_recover_workflow_and_exchange_json_tokens() {
 fn replay_is_rejected_even_though_old_mac_still_verifies() {
     block_on(async {
         let p = engine();
-        let root = p.start(1, Value::Null).await.unwrap();
-        p.execute(1, 0, std::slice::from_ref(&root), vec![Value::Null; 2])
-            .await
-            .unwrap();
+        let root = p.start(1).await.unwrap();
+        p.execute(1, 0, std::slice::from_ref(&root)).await.unwrap();
         p.verify_token(&root).unwrap();
         assert_eq!(
             p.granted(1, 0, std::slice::from_ref(&root)).await,
             Err(Error::InvalidInputs)
         );
-        assert_eq!(
-            p.execute(1, 0, &[root], vec![Value::Null; 2]).await,
-            Err(Error::InvalidInputs)
-        );
+        assert_eq!(p.execute(1, 0, &[root]).await, Err(Error::InvalidInputs));
     });
 }
 
@@ -133,8 +108,8 @@ fn replay_is_rejected_even_though_old_mac_still_verifies() {
 fn duplicate_run_and_missing_run_fail() {
     block_on(async {
         let p = engine();
-        p.start(1, Value::Null).await.unwrap();
-        assert_eq!(p.start(1, Value::Null).await, Err(Error::Conflict));
+        p.start(1).await.unwrap();
+        assert_eq!(p.start(1).await, Err(Error::Conflict));
         assert_eq!(p.snapshot(99).await, Err(Error::NotFound));
     });
 }
@@ -147,7 +122,7 @@ fn wrong_transition_missing_duplicate_wrong_place_and_cross_run_inputs_fail_atom
         let others = fork(&p, 2).await;
         let before = p.snapshot(1).await.unwrap();
         assert_eq!(
-            p.execute(1, 999, &branches[..1], vec![Value::Null]).await,
+            p.execute(1, 999, &branches[..1]).await,
             Err(Error::UnknownTransition)
         );
         for inputs in [
@@ -156,19 +131,9 @@ fn wrong_transition_missing_duplicate_wrong_place_and_cross_run_inputs_fail_atom
             vec![branches[0].clone(); 2],
             vec![others[0].clone()],
         ] {
-            assert_eq!(
-                p.execute(1, 1, &inputs, vec![Value::Null]).await,
-                Err(Error::InvalidInputs)
-            );
+            assert_eq!(p.execute(1, 1, &inputs).await, Err(Error::InvalidInputs));
         }
-        assert_eq!(
-            p.execute(1, 3, &branches, vec![Value::Null]).await,
-            Err(Error::InvalidInputs)
-        );
-        assert_eq!(
-            p.execute(1, 1, &branches[..1], vec![]).await,
-            Err(Error::InvalidOutputs)
-        );
+        assert_eq!(p.execute(1, 3, &branches).await, Err(Error::InvalidInputs));
         assert_eq!(p.snapshot(1).await.unwrap(), before);
     });
 }
@@ -177,16 +142,15 @@ fn wrong_transition_missing_duplicate_wrong_place_and_cross_run_inputs_fail_atom
 fn every_token_claim_and_tag_are_authenticated() {
     block_on(async {
         let p = engine();
-        let token = p.start(1, json!(42)).await.unwrap();
+        let token = p.start(1).await.unwrap();
         let original = serde_json::to_value(&token).unwrap();
         for (field, value) in [
-            ("version", json!(2)),
+            ("version", json!(3)),
             ("run", json!(2)),
             ("id", json!(8)),
             ("place", json!(1)),
             ("scope", json!([1])),
             ("parents", json!([1])),
-            ("data", json!(43)),
             ("definition", json!(vec![0; 32])),
         ] {
             let mut value_json = original.clone();
@@ -215,7 +179,7 @@ fn every_token_claim_and_tag_are_authenticated() {
 fn wrong_secret_and_wrong_definition_reject_tokens() {
     block_on(async {
         let p = engine();
-        let token = p.start(1, Value::Null).await.unwrap();
+        let token = p.start(1).await.unwrap();
         let wrong_key = Petri::new(
             definition(),
             Shared::new(MemoryStorage::new()),
@@ -242,9 +206,7 @@ fn snapshot_export_import_verifies_but_cannot_overwrite_current_state() {
         let old =
             Snapshot::from_json(&p.snapshot(u128::MAX).await.unwrap().to_json().unwrap()).unwrap();
         p.verify_snapshot(&old).unwrap();
-        p.execute(u128::MAX, 1, &branches[..1], vec![Value::Null])
-            .await
-            .unwrap();
+        p.execute(u128::MAX, 1, &branches[..1]).await.unwrap();
         assert_eq!(p.restore(old.clone()).await, Err(Error::Conflict));
         let q = engine();
         q.restore(old.clone()).await.unwrap();
@@ -277,16 +239,13 @@ fn weighted_arcs_require_exact_multiplicity() {
             Shared::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        let root = p.start(1, Value::Null).await.unwrap();
-        let tokens = p
-            .execute(1, 0, &[root], vec![json!(1), json!(2), json!(3)])
-            .await
-            .unwrap();
+        let root = p.start(1).await.unwrap();
+        let tokens = p.execute(1, 0, &[root]).await.unwrap();
         assert_eq!(
             p.granted(1, 1, &tokens[..2]).await,
             Err(Error::InvalidInputs)
         );
-        let joined = p.execute(1, 1, &tokens, vec![Value::Null]).await.unwrap();
+        let joined = p.execute(1, 1, &tokens).await.unwrap();
         assert!(joined[0].scope().is_empty());
         assert_eq!(joined[0].parents().len(), 3);
     });
@@ -328,26 +287,15 @@ fn nested_fork_restores_outer_context_before_outer_join() {
             Shared::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        let root = p.start(1, Value::Null).await.unwrap();
-        let outer = p
-            .execute(1, 0, &[root], vec![Value::Null; 2])
-            .await
-            .unwrap();
-        let inner = p
-            .execute(1, 1, &outer[..1], vec![Value::Null; 2])
-            .await
-            .unwrap();
+        let root = p.start(1).await.unwrap();
+        let outer = p.execute(1, 0, &[root]).await.unwrap();
+        let inner = p.execute(1, 1, &outer[..1]).await.unwrap();
         assert_eq!(inner[0].scope().len(), 2);
-        let merged = p.execute(1, 2, &inner, vec![Value::Null]).await.unwrap();
+        let merged = p.execute(1, 2, &inner).await.unwrap();
         assert_eq!(merged[0].scope(), outer[1].scope());
-        p.execute(
-            1,
-            3,
-            &[merged[0].clone(), outer[1].clone()],
-            vec![Value::Null],
-        )
-        .await
-        .unwrap();
+        p.execute(1, 3, &[merged[0].clone(), outer[1].clone()])
+            .await
+            .unwrap();
     });
 }
 
@@ -381,12 +329,12 @@ fn two_real_threads_competing_on_same_revision_only_commit_once() {
     });
     let auth = Shared::new(Authenticator::new([7; 32]));
     let p = Shared::new(Petri::new(definition(), store.clone(), auth).unwrap());
-    let token = block_on(p.start(1, Value::Null)).unwrap();
+    let token = block_on(p.start(1)).unwrap();
     let handles: Vec<_> = (0..2)
         .map(|_| {
             let p = p.clone();
             let token = token.clone();
-            std::thread::spawn(move || block_on(p.execute(1, 0, &[token], vec![Value::Null; 2])))
+            std::thread::spawn(move || block_on(p.execute(1, 0, &[token])))
         })
         .collect();
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
@@ -454,7 +402,7 @@ fn definition_validation_rejects_ambiguous_and_unbounded_arcs() {
     let json = definition()
         .to_json()
         .unwrap()
-        .replace("\"version\":1", "\"version\":2");
+        .replace("\"version\":2", "\"version\":3");
     assert_eq!(Definition::from_json(&json), Err(Error::InvalidDefinition));
     assert!(Token::from_json("{}").is_err());
     assert!(Snapshot::from_json("{}").is_err());
@@ -467,11 +415,9 @@ fn immutable_archives_never_authorize_stale_execution() {
         let cache = tiercache::Cache::new(vec![Box::new(tiercache::Lru::new(16))]);
         let p = engine();
         assert!(p.read_archive(1, 0, &cache).await.unwrap().is_none());
-        let root = p.start(1, Value::Null).await.unwrap();
+        let root = p.start(1).await.unwrap();
         let archived = p.archive(1, &cache).await.unwrap();
-        p.execute(1, 0, std::slice::from_ref(&root), vec![Value::Null; 2])
-            .await
-            .unwrap();
+        p.execute(1, 0, std::slice::from_ref(&root)).await.unwrap();
         assert_eq!(p.read_archive(1, 0, &cache).await.unwrap(), Some(archived));
         assert_eq!(p.granted(1, 0, &[root]).await, Err(Error::InvalidInputs));
     });
@@ -501,10 +447,7 @@ fn backend_failure_is_not_a_cache_miss_or_successful_execution() {
             Shared::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        assert_eq!(
-            p.start(1, Value::Null).await,
-            Err(Error::Storage("offline".into()))
-        );
+        assert_eq!(p.start(1).await, Err(Error::Storage("offline".into())));
         assert_eq!(p.snapshot(1).await, Err(Error::Storage("offline".into())));
     });
 }
@@ -512,9 +455,9 @@ fn backend_failure_is_not_a_cache_miss_or_successful_execution() {
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config::with_cases(128))]
     #[test]
-    fn arbitrary_run_ids_and_payloads_round_trip(run in proptest::prelude::any::<u128>(), data in proptest::prelude::any::<String>()) {
+    fn arbitrary_run_ids_round_trip(run in proptest::prelude::any::<u128>()) {
         block_on(async {
-            let p=engine();let token=p.start(run,json!(data)).await.unwrap();
+            let p=engine();let token=p.start(run).await.unwrap();
             let transported=Token::from_json(&token.to_json().unwrap()).unwrap();
             p.verify_token(&transported).unwrap();
             assert_eq!(transported,token);
@@ -531,11 +474,11 @@ proptest::proptest! {
             let mut completed=Vec::new();
             for index in order {
                 let input=&branches[index..index+1];
-                let output=p.execute(run.into(),index as u32+1,input,vec![Value::Null]).await.unwrap();
+                let output=p.execute(run.into(), index as u32+1, input).await.unwrap();
                 assert_eq!(p.granted(run.into(),index as u32+1,input).await,Err(Error::InvalidInputs));
                 completed.extend(output);
             }
-            let result=p.execute(run.into(),3,&completed,vec![Value::Null]).await.unwrap();
+            let result=p.execute(run.into(), 3, &completed).await.unwrap();
             assert_eq!(result.len(),1);assert_eq!(result[0].place(),5);
             assert_eq!(p.snapshot(run.into()).await.unwrap().tokens().len(),1);
         });
@@ -561,8 +504,8 @@ impl Storage for MisroutedStore {
 fn wrongly_routed_storage_record_is_rejected() {
     block_on(async {
         let p = engine();
-        let root = p.start(1, json!({"value":42})).await.unwrap();
-        assert_eq!(root.data(), &json!({"value":42}));
+        p.start(1).await.unwrap();
+
         assert_eq!(p.definition().transitions().len(), 6);
         let q = Petri::new(
             definition(),

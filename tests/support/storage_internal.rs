@@ -13,7 +13,7 @@ fn backend_rejects_namespace_mismatch_and_invalid_revision_update() {
             Arc::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        p.start(1, serde_json::Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         let snapshot = p.snapshot(1).await.unwrap();
         assert_eq!(
             store

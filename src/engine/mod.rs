@@ -7,7 +7,6 @@ pub use storage::{BoxFuture, MemoryStorage, Storage};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as Shared;
@@ -22,7 +21,7 @@ pub type RunId = u128;
 pub type TokenId = u64;
 /// SHA-256 identity of the exact serialized definition.
 pub type DefinitionHash = [u8; 32];
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const MAX_TOKENS: usize = 4096;
 const MAX_BYTES: usize = 4 * 1024 * 1024;
 type HmacSha256 = Hmac<Sha256>;
@@ -34,7 +33,6 @@ pub enum Error {
     InvalidSnapshot,
     InvalidToken,
     InvalidInputs,
-    InvalidOutputs,
     IncompatibleScope,
     UnknownTransition,
     NotFound,
@@ -181,7 +179,6 @@ struct Claims {
     place: PlaceId,
     scope: Vec<u64>,
     parents: Vec<TokenId>,
-    data: Value,
 }
 
 /// Portable token. Deserialization is not verification; use [`Petri::verify_token`].
@@ -206,9 +203,6 @@ impl Token {
     }
     pub fn parents(&self) -> &[TokenId] {
         &self.claims.parents
-    }
-    pub fn data(&self) -> &Value {
-        &self.claims.data
     }
     pub fn to_json(&self) -> Result<String> {
         encode_string(self)
@@ -313,9 +307,9 @@ impl<S: Storage> Petri<S> {
     }
 
     /// Creates one initial token. Atomic insert rejects an already-used run ID.
-    pub async fn start(&self, run: RunId, data: Value) -> Result<Token> {
+    pub async fn start(&self, run: RunId) -> Result<Token> {
         let mut tokens = self
-            .start_marking(run, vec![(self.definition.initial, data)])
+            .start_marking(run, vec![self.definition.initial])
             .await?;
         Ok(tokens.remove(0))
     }
@@ -324,13 +318,13 @@ impl<S: Storage> Petri<S> {
     pub(crate) async fn start_marking(
         &self,
         run: RunId,
-        entries: Vec<(PlaceId, Value)>,
+        entries: Vec<PlaceId>,
     ) -> Result<Vec<Token>> {
         if entries.is_empty() || entries.len() > MAX_TOKENS {
             return Err(Error::Limit);
         }
         let mut tokens = Vec::with_capacity(entries.len());
-        for (id, (place, data)) in entries.into_iter().enumerate() {
+        for (id, place) in entries.into_iter().enumerate() {
             if !self.definition.places.contains(&place) {
                 return Err(Error::InvalidInputs);
             }
@@ -342,7 +336,6 @@ impl<S: Storage> Petri<S> {
                 place,
                 scope: vec![],
                 parents: vec![],
-                data,
             })?);
         }
         let snapshot = self.seal(State {
@@ -363,7 +356,7 @@ impl<S: Storage> Petri<S> {
     /// Verifies authenticity and definition binding, not current availability.
     pub fn verify_token(&self, token: &Token) -> Result<()> {
         self.auth
-            .verify(b"petri-core/token/v1\0", &token.claims, &token.tag)?;
+            .verify(b"petri-core/token/v2\0", &token.claims, &token.tag)?;
         if token.claims.version != VERSION
             || token.claims.definition != self.hash
             || !self.definition.places.contains(&token.place())
@@ -376,7 +369,7 @@ impl<S: Storage> Petri<S> {
     /// Verifies authenticity and structural consistency, not freshness.
     pub fn verify_snapshot(&self, snapshot: &Snapshot) -> Result<()> {
         self.auth
-            .verify(b"petri-core/snapshot/v1\0", &snapshot.state, &snapshot.tag)
+            .verify(b"petri-core/snapshot/v2\0", &snapshot.state, &snapshot.tag)
             .map_err(|_| Error::InvalidSnapshot)?;
         let s = &snapshot.state;
         if s.version != VERSION
@@ -441,21 +434,16 @@ impl<S: Storage> Petri<S> {
     }
 
     /// Consumes inputs and inserts authenticated descendants atomically.
-    /// Output payloads follow output-arc order, then weight order within each arc.
     /// A storage conflict is returned to the caller; no automatic business retry.
     pub async fn execute(
         &self,
         run: RunId,
         transition: TransitionId,
         inputs: &[Token],
-        data: Vec<Value>,
     ) -> Result<Vec<Token>> {
         let snapshot = self.snapshot(run).await?;
         let (t, mut scope) = self.prepare(&snapshot, transition, inputs)?;
         let count: usize = t.outputs.iter().map(|a| a.weight as usize).sum();
-        if data.len() != count {
-            return Err(Error::InvalidOutputs);
-        }
         let mut state = snapshot.state;
         if state.tokens.len() - inputs.len() + count > MAX_TOKENS {
             return Err(Error::Limit);
@@ -472,7 +460,6 @@ impl<S: Storage> Petri<S> {
         state.tokens.retain(|t| !selected.contains(&t.id()));
         let mut parents: Vec<_> = selected.into_iter().collect();
         parents.sort_unstable();
-        let mut data = data.into_iter();
         let mut outputs = Vec::with_capacity(count);
         for arc in &t.outputs {
             for _ in 0..arc.weight {
@@ -486,7 +473,6 @@ impl<S: Storage> Petri<S> {
                     place: arc.place,
                     scope: scope.clone(),
                     parents: parents.clone(),
-                    data: data.next().expect("validated output count"),
                 })?);
             }
         }
@@ -531,11 +517,11 @@ impl<S: Storage> Petri<S> {
         Ok((t, scope.to_vec()))
     }
     fn issue(&self, claims: Claims) -> Result<Token> {
-        let tag = self.auth.sign(b"petri-core/token/v1\0", &claims)?;
+        let tag = self.auth.sign(b"petri-core/token/v2\0", &claims)?;
         Ok(Token { claims, tag })
     }
     fn seal(&self, state: State) -> Result<Snapshot> {
-        let tag = self.auth.sign(b"petri-core/snapshot/v1\0", &state)?;
+        let tag = self.auth.sign(b"petri-core/snapshot/v2\0", &state)?;
         let snapshot = Snapshot { state, tag };
         encode(&snapshot)?;
         Ok(snapshot)
@@ -593,7 +579,7 @@ impl<S: Storage> Petri<S> {
     }
     fn archive_key(&self, run: RunId, revision: u64) -> String {
         let hash: String = self.hash.iter().map(|b| format!("{b:02x}")).collect();
-        format!("petri-core/v1/{hash}/{run}/{revision}")
+        format!("petri-core/v2/{hash}/{run}/{revision}")
     }
 }
 

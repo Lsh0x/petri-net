@@ -1,0 +1,9 @@
+Version: 1
+Tasks:
+  Paiement:
+    Id: 1
+  Preparation:
+    Id: 2
+  Expedition:
+    Id: 3
+    DependsOn: [Paiement, Preparation]

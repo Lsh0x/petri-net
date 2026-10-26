@@ -1,6 +1,5 @@
 //! Native fork/join, JSON transport and a shared authoritative store.
 use petri_core::engine::{Arc, Authenticator, Definition, MemoryStorage, Petri, Token, Transition};
-use serde_json::json;
 use std::sync::Arc as Shared;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,30 +34,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             auth,
         )?;
 
-        let root = p.start(1001, json!({"order": 1001})).await?;
-        let branches = p
-            .execute(1001, 0, &[root], vec![json!("payment"), json!("packing")])
-            .await?;
+        let root = p.start(1001).await?;
+        let branches = p.execute(1001, 0, &[root]).await?;
         let payment = Token::from_json(&branches[0].to_json()?)?;
         q.granted(1001, 1, std::slice::from_ref(&payment)).await?;
         // The payment service does its business work before recording completion.
-        let paid = q
-            .execute(1001, 1, &[payment], vec![json!({"paid": true})])
-            .await?;
+        let paid = q.execute(1001, 1, &[payment]).await?;
         assert!(p.granted(1001, 3, &paid).await.is_err());
         println!("Paid, but packing is pending: shipping is blocked.");
 
-        let packed = p
-            .execute(1001, 2, &branches[1..], vec![json!({"packed": true})])
-            .await?;
-        let shipped = q
-            .execute(
-                1001,
-                3,
-                &[paid, packed].concat(),
-                vec![json!({"shipped": true})],
-            )
-            .await?;
+        let packed = p.execute(1001, 2, &branches[1..]).await?;
+        let shipped = q.execute(1001, 3, &[paid, packed].concat()).await?;
         assert_eq!(shipped[0].place(), 5);
         assert!(shipped[0].scope().is_empty());
         let snapshot = p.snapshot(1001).await?;

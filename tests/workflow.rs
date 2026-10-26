@@ -1,7 +1,7 @@
 use futures::executor::block_on;
 use petri_core::engine::{Authenticator, MemoryStorage};
 use petri_core::workflow::{Error, Petri, TaskToken, Workflow};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::sync::Arc;
 
 const ORDER: &str = include_str!("../examples/workflows/order.yaml");
@@ -27,10 +27,10 @@ async fn finish(p: &Petri<MemoryStorage>, run: u128, id: u32) {
         .find(|t| t.task_id() == id)
         .unwrap();
     p.granted(&token).await.unwrap();
-    let receipt = p.executed(token, json!({"task":id})).await.unwrap();
+    let receipt = p.executed(token).await.unwrap();
     assert_eq!(receipt.task_id(), id);
     assert_eq!(receipt.run_id(), run);
-    assert_eq!(receipt.result(), &json!({"task":id}));
+
     p.verify_completion(&receipt).unwrap();
 }
 
@@ -38,9 +38,9 @@ async fn finish(p: &Petri<MemoryStorage>, run: u128, id: u32) {
 fn order_shared_payment_unlocks_invoice_and_preparation_without_stealing_tokens() {
     block_on(async {
         let p = make_engine(ORDER);
-        let roots = p.start(1, json!("request")).await.unwrap();
+        let roots = p.start(1).await.unwrap();
         assert_eq!(ids(&roots), vec![1]);
-        assert_eq!(roots[0].initial_data(), Some(&json!("request")));
+
         finish(&p, 1, 1).await;
         assert_eq!(ids(&p.ready(1).await.unwrap()), vec![2, 3, 4]);
         finish(&p, 1, 2).await;
@@ -56,10 +56,7 @@ fn order_shared_payment_unlocks_invoice_and_preparation_without_stealing_tokens(
             .find(|t| t.task_id() == 6)
             .unwrap();
         assert_eq!(prep.dependencies(), &[2, 3]);
-        assert_eq!(prep.input(2), Some(&json!({"task":2})));
-        assert_eq!(prep.input(3), Some(&json!({"task":3})));
-        assert!(prep.initial_data().is_none());
-        assert!(prep.input(999).is_none());
+
         finish(&p, 1, 6).await;
         assert_eq!(ids(&p.ready(1).await.unwrap()), vec![4]);
         finish(&p, 1, 4).await;
@@ -77,7 +74,7 @@ fn order_shared_payment_unlocks_invoice_and_preparation_without_stealing_tokens(
 fn crossed_media_joins_do_not_require_matching_fork_stacks() {
     block_on(async {
         let p = make_engine(MEDIA);
-        p.start(1, Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         for id in [1, 2, 3, 4, 5, 6] {
             finish(&p, 1, id).await;
         }
@@ -96,10 +93,10 @@ fn crossed_media_joins_do_not_require_matching_fork_stacks() {
 fn independent_roots_are_created_atomically_and_terminals_all_count() {
     block_on(async {
         let p = make_engine(DEPLOY);
-        let roots = p.start(u128::MAX, json!(42)).await.unwrap();
+        let roots = p.start(u128::MAX).await.unwrap();
         assert_eq!(ids(&roots), vec![1, 2, 3]);
         assert_eq!(p.status(u128::MAX).await.unwrap().revision, 0);
-        assert!(p.start(u128::MAX, Value::Null).await.is_err());
+        assert!(p.start(u128::MAX).await.is_err());
         for id in [2, 3, 5, 1, 4, 6, 8, 9] {
             finish(&p, u128::MAX, id).await;
         }
@@ -108,7 +105,7 @@ fn independent_roots_are_created_atomically_and_terminals_all_count() {
         finish(&p, u128::MAX, 10).await;
         assert!(p.status(u128::MAX).await.unwrap().finished);
         let independent = make_engine("Version: 1\nTasks:\n  A: {Id: 0}\n  B: {Id: 4294967295}\n");
-        independent.start(1, Value::Null).await.unwrap();
+        independent.start(1).await.unwrap();
         finish(&independent, 1, 0).await;
         assert!(!independent.status(1).await.unwrap().finished);
         finish(&independent, 1, u32::MAX).await;
@@ -153,8 +150,8 @@ fn yaml_json_export_order_and_dependency_order_compile_to_same_definition() {
             Arc::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        pa.start(1, Value::Null).await.unwrap();
-        pb.start(1, Value::Null).await.unwrap();
+        pa.start(1).await.unwrap();
+        pb.start(1).await.unwrap();
         assert_eq!(
             pa.snapshot(1).await.unwrap().definition_hash(),
             pb.snapshot(1).await.unwrap().definition_hash()
@@ -170,12 +167,12 @@ fn services_transport_tickets_restore_snapshots_and_reject_replays() {
         let auth = Arc::new(Authenticator::new([7; 32]));
         let p = Petri::new(workflow.clone(), store.clone(), auth.clone()).unwrap();
         let q = Petri::new(workflow.clone(), store, auth.clone()).unwrap();
-        let root = p.start(1, Value::Null).await.unwrap().remove(0);
+        let root = p.start(1).await.unwrap().remove(0);
         let ticket = TaskToken::from_json(&root.to_json().unwrap()).unwrap();
         q.granted(&ticket).await.unwrap();
-        q.executed(ticket, Value::Null).await.unwrap();
+        q.executed(ticket).await.unwrap();
         assert!(p.granted(&root).await.is_err());
-        assert!(p.executed(root, Value::Null).await.is_err());
+        assert!(p.executed(root).await.is_err());
         let recovered = Petri::new(workflow, Arc::new(MemoryStorage::new()), auth).unwrap();
         recovered
             .restore(p.snapshot(1).await.unwrap())
@@ -190,11 +187,11 @@ fn services_transport_tickets_restore_snapshots_and_reject_replays() {
 }
 
 #[test]
-fn forged_task_run_dependency_payload_and_receipt_are_rejected() {
+fn forged_task_run_dependencies_and_receipt_are_rejected() {
     block_on(async {
         let p = make_engine(ORDER);
-        let root = p.start(1, Value::Null).await.unwrap().remove(0);
-        p.start(2, Value::Null).await.unwrap();
+        let root = p.start(1).await.unwrap().remove(0);
+        p.start(2).await.unwrap();
         let original = serde_json::to_value(&root).unwrap();
         for (field, value) in [
             ("task", json!(999)),
@@ -207,13 +204,13 @@ fn forged_task_run_dependency_payload_and_receipt_are_rejected() {
             forged[field] = value;
             let ticket: TaskToken = serde_json::from_value(forged).unwrap();
             assert!(p.granted(&ticket).await.is_err());
-            assert!(p.executed(ticket, Value::Null).await.is_err());
+            assert!(p.executed(ticket).await.is_err());
         }
         let mut forged = original;
-        forged["inputs"][0]["claims"]["data"] = json!("forged");
+        forged["inputs"][0]["claims"]["id"] = json!(999);
         let ticket: TaskToken = serde_json::from_value(forged).unwrap();
         assert!(p.granted(&ticket).await.is_err());
-        let receipt = p.executed(root, Value::Null).await.unwrap();
+        let receipt = p.executed(root).await.unwrap();
         let mut forged = serde_json::to_value(&receipt).unwrap();
         forged["task"] = json!(2);
         assert!(p
@@ -229,7 +226,7 @@ fn forged_task_run_dependency_payload_and_receipt_are_rejected() {
         let invalid: TaskToken =
             serde_json::from_value(json!({"run":1,"task":2,"dependencies":[1],"inputs":[]}))
                 .unwrap();
-        assert!(invalid.input(1).is_none());
+        assert!(p.granted(&invalid).await.is_err());
     });
 }
 
@@ -294,7 +291,7 @@ proptest::proptest! {
             let workflow=Workflow::from_json(&json!({"Version":1,"Tasks":tasks}).to_string()).unwrap();
             let workflow=Workflow::from_yaml(&workflow.to_yaml().unwrap()).unwrap();
             let p=Petri::new(workflow,Arc::new(MemoryStorage::new()),Arc::new(Authenticator::new([7;32]))).unwrap();
-            p.start(1,json!("root")).await.unwrap();
+            p.start(1).await.unwrap();
             let mut completed=std::collections::BTreeSet::new();
             for choice in choices.iter().take(count) {
                 let status=p.status(1).await.unwrap();
@@ -303,7 +300,7 @@ proptest::proptest! {
                 assert!(!status.finished);
                 let ticket=status.ready[*choice as usize%status.ready.len()].clone();
                 let task=ticket.task_id();
-                p.executed(ticket,json!({"task":task})).await.unwrap();
+                p.executed(ticket).await.unwrap();
                 completed.insert(task as usize);
             }
             let status=p.status(1).await.unwrap();assert!(status.finished);assert!(status.ready.is_empty());assert_eq!(status.completed.len(),count);assert_eq!(status.revision,count as u64);
@@ -334,9 +331,9 @@ fn workflow_archives_are_historical_and_cannot_resurrect_a_task() {
         let p = make_engine(ORDER);
         let cache = tiercache::Cache::new(vec![Box::new(tiercache::Lru::new(16))]);
         assert!(p.read_archive(1, 0, &cache).await.unwrap().is_none());
-        let root = p.start(1, Value::Null).await.unwrap().remove(0);
+        let root = p.start(1).await.unwrap().remove(0);
         let archived = p.archive(1, &cache).await.unwrap();
-        p.executed(root.clone(), Value::Null).await.unwrap();
+        p.executed(root.clone()).await.unwrap();
         assert_eq!(p.read_archive(1, 0, &cache).await.unwrap(), Some(archived));
         assert!(p.granted(&root).await.is_err());
     });
@@ -390,14 +387,14 @@ fn racing_siblings_conflict_safely_and_losing_ticket_can_be_retried() {
         )
         .unwrap(),
     );
-    let roots = block_on(p.start(1, Value::Null)).unwrap();
+    let roots = block_on(p.start(1)).unwrap();
     store.gate.store(true, std::sync::atomic::Ordering::SeqCst);
     let handles: Vec<_> = roots
         .into_iter()
         .map(|ticket| {
             let p = p.clone();
             std::thread::spawn(move || {
-                let result = block_on(p.executed(ticket.clone(), Value::Null));
+                let result = block_on(p.executed(ticket.clone()));
                 (ticket, result)
             })
         })
@@ -411,11 +408,55 @@ fn racing_siblings_conflict_safely_and_losing_ticket_can_be_retried() {
                 result,
                 Err(Error::Engine(petri_core::engine::Error::Conflict))
             );
-            block_on(p.executed(ticket, Value::Null)).unwrap();
+            block_on(p.executed(ticket)).unwrap();
         }
     }
     let status = block_on(p.status(1)).unwrap();
     assert!(status.finished);
     assert_eq!(status.completed, vec![1, 2]);
     assert_eq!(status.revision, 2);
+}
+
+#[test]
+fn execution_exports_contain_proofs_only_and_reject_business_fields() {
+    fn proof_only(value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, value) in map {
+                    assert!(!["data", "payload", "result", "commande_id", "montant"]
+                        .contains(&key.as_str()));
+                    proof_only(value);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    proof_only(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    block_on(async {
+        let p = make_engine(ORDER);
+        let root = p.start(1).await.unwrap().remove(0);
+        proof_only(&serde_json::to_value(&root).unwrap());
+        assert_eq!(p.granted_for(1, &root).await, Ok(()));
+        assert_eq!(p.granted_for(2, &root).await, Err(Error::InvalidTicket));
+        let mut injected = serde_json::to_value(&root).unwrap();
+        injected["data"] = json!({"commande_id":1001});
+        assert!(TaskToken::from_json(&injected.to_string()).is_err());
+        let mut injected = serde_json::to_value(&root).unwrap();
+        injected["inputs"][0]["claims"]["data"] = json!("business payload");
+        assert!(TaskToken::from_json(&injected.to_string()).is_err());
+        let receipt = p.executed(root).await.unwrap();
+        proof_only(&serde_json::to_value(&receipt).unwrap());
+        let mut injected = serde_json::to_value(&receipt).unwrap();
+        injected["result"] = json!({"paid":true});
+        assert!(serde_json::from_value::<petri_core::workflow::Completion>(injected).is_err());
+        let snapshot = p.snapshot(1).await.unwrap();
+        proof_only(&serde_json::to_value(&snapshot).unwrap());
+        let mut injected = serde_json::to_value(snapshot).unwrap();
+        injected["state"]["data"] = json!("business payload");
+        assert!(petri_core::engine::Snapshot::from_json(&injected.to_string()).is_err());
+    });
 }

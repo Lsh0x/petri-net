@@ -7,7 +7,6 @@ use crate::engine::{
     self, Arc, Authenticator, Definition, RunId, Snapshot, Storage, Token, Transition,
 };
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc as Shared;
 
@@ -282,7 +281,6 @@ impl Workflow {
                 CompiledTask {
                     dependencies,
                     inputs,
-                    outputs,
                     marker,
                 },
             );
@@ -307,7 +305,6 @@ fn check_size(input: &str) -> Result<()> {
 struct CompiledTask {
     dependencies: Vec<TaskId>,
     inputs: Vec<u32>,
-    outputs: Vec<u32>,
     marker: u32,
 }
 struct Compiled {
@@ -317,7 +314,7 @@ struct Compiled {
 }
 
 /// Portable task activation. Parsing is not authorization: call `granted` or
-/// `executed` before trusting its payloads. Embedded tokens are authenticated.
+/// `executed` before trusting its execution claims. Embedded tokens are authenticated.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskToken {
@@ -335,21 +332,6 @@ impl TaskToken {
     }
     pub fn dependencies(&self) -> &[TaskId] {
         &self.dependencies
-    }
-    /// Root data, supplied to `start`; non-root tasks return None.
-    pub fn initial_data(&self) -> Option<&Value> {
-        if self.dependencies.is_empty() {
-            self.inputs.first().map(Token::data)
-        } else {
-            None
-        }
-    }
-    /// Result produced by a particular direct prerequisite.
-    pub fn input(&self, task: TaskId) -> Option<&Value> {
-        self.dependencies
-            .iter()
-            .position(|id| *id == task)
-            .and_then(|i| self.inputs.get(i).map(Token::data))
     }
     pub fn to_json(&self) -> Result<String> {
         let json = serde_json::to_string(self).map_err(|e| Error::Parse(e.to_string()))?;
@@ -375,9 +357,6 @@ impl Completion {
     }
     pub fn run_id(&self) -> RunId {
         self.token.run_id()
-    }
-    pub fn result(&self) -> &Value {
-        self.token.data()
     }
 }
 
@@ -415,13 +394,8 @@ impl<S: Storage> Petri<S> {
         &self.workflow
     }
     /// Creates all root activations in one atomic insert. No partial bootstrap.
-    pub async fn start(&self, run: RunId, data: Value) -> Result<Vec<TaskToken>> {
-        let entries = self
-            .compiled
-            .root_places
-            .values()
-            .map(|place| (*place, data.clone()))
-            .collect();
+    pub async fn start(&self, run: RunId) -> Result<Vec<TaskToken>> {
+        let entries = self.compiled.root_places.values().copied().collect();
         let tokens = self.engine.start_marking(run, entries).await?;
         let mut roots = Vec::new();
         for (task, place) in &self.compiled.root_places {
@@ -506,18 +480,22 @@ impl<S: Storage> Petri<S> {
             .await?;
         Ok(())
     }
+    /// Checks that a service received a token for its expected task, then
+    /// performs the same advisory authorization as `granted`.
+    pub async fn granted_for(&self, task: TaskId, ticket: &TaskToken) -> Result<()> {
+        if ticket.task_id() != task {
+            return Err(Error::InvalidTicket);
+        }
+        self.granted(ticket).await
+    }
+
     /// Records declared completion and atomically produces all dependent inputs.
-    /// Caller output is copied to every outgoing edge and the completion receipt.
-    pub async fn executed(&self, ticket: TaskToken, result: Value) -> Result<Completion> {
+    /// Tokens carry execution proofs only; business results stay outside the engine.
+    pub async fn executed(&self, ticket: TaskToken) -> Result<Completion> {
         let task = self.check_ticket(&ticket)?;
         let outputs = self
             .engine
-            .execute(
-                ticket.run,
-                ticket.task,
-                &ticket.inputs,
-                vec![result; task.outputs.len()],
-            )
+            .execute(ticket.run, ticket.task, &ticket.inputs)
             .await?;
         let token = outputs
             .into_iter()

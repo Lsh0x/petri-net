@@ -1,7 +1,6 @@
 //! Run any of the three dependency graphs without defining internal Petri arcs.
 use petri_core::engine::{Authenticator, MemoryStorage};
 use petri_core::workflow::{Petri, Workflow};
-use serde_json::json;
 use std::sync::Arc;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -17,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(MemoryStorage::new()),
                 Arc::new(Authenticator::new([7; 32])),
             )?; // Demo key only.
-            p.start(1001, json!({"request": 1001})).await?;
+            p.start(1001).await?;
             loop {
                 let status = p.status(1001).await?;
                 if status.finished {
@@ -32,9 +31,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // example records them sequentially to keep the output readable.
                 for token in status.ready {
                     p.granted(&token).await?;
-                    let result = json!({"completed_by": token.task_id()});
                     // Your business work belongs here, before recording success.
-                    p.executed(token, result).await?;
+                    p.executed(token).await?;
                 }
             }
             println!("{name}: finished");

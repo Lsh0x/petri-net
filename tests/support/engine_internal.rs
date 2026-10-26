@@ -22,11 +22,11 @@ fn engine() -> Petri<MemoryStorage> {
 fn authenticated_but_structurally_invalid_snapshots_are_rejected() {
     block_on(async {
         let p = engine();
-        p.start(1, Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         let original = p.snapshot(1).await.unwrap().state;
         let mut cases = Vec::new();
         let mut s = original.clone();
-        s.version = 2;
+        s.version = 3;
         cases.push(s);
         let mut s = original.clone();
         s.definition = [0; 32];
@@ -65,7 +65,7 @@ fn authenticated_but_structurally_invalid_snapshots_are_rejected() {
                 Err(Error::InvalidSnapshot)
             );
         }
-        for (version, place) in [(2, 0), (1, 99)] {
+        for (version, place) in [(3, 0), (2, 99)] {
             let mut claims = original.tokens[0].claims.clone();
             claims.version = version;
             claims.place = place;
@@ -81,16 +81,13 @@ fn authenticated_but_structurally_invalid_snapshots_are_rejected() {
 fn scope_mismatch_and_counter_exhaustion_never_commit() {
     block_on(async {
         let p = engine();
-        p.start(1, Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         let mut state = p.snapshot(1).await.unwrap().state;
         state.revision = u64::MAX;
         let snapshot = p.seal(state).unwrap();
         let q = engine();
         q.restore(snapshot.clone()).await.unwrap();
-        assert_eq!(
-            q.execute(1, 0, snapshot.tokens(), vec![Value::Null]).await,
-            Err(Error::Limit)
-        );
+        assert_eq!(q.execute(1, 0, snapshot.tokens()).await, Err(Error::Limit));
         assert_eq!(q.snapshot(1).await.unwrap(), snapshot);
         let mut state = snapshot.state;
         state.revision = 0;
@@ -98,10 +95,7 @@ fn scope_mismatch_and_counter_exhaustion_never_commit() {
         let q = engine();
         let snapshot = p.seal(state).unwrap();
         q.restore(snapshot.clone()).await.unwrap();
-        assert_eq!(
-            q.execute(1, 0, snapshot.tokens(), vec![Value::Null]).await,
-            Err(Error::Limit)
-        );
+        assert_eq!(q.execute(1, 0, snapshot.tokens()).await, Err(Error::Limit));
         assert_eq!(q.snapshot(1).await.unwrap(), snapshot);
     });
 }
@@ -124,7 +118,7 @@ fn incompatible_forks_and_scope_overflow_fail() {
             Shared::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        let token = p.start(1, Value::Null).await.unwrap();
+        let token = p.start(1).await.unwrap();
         let mut state = p.snapshot(1).await.unwrap().state;
         let mut a = token.claims.clone();
         a.id = 1;
@@ -158,8 +152,7 @@ fn incompatible_forks_and_scope_overflow_fail() {
         let snapshot = p.seal(state).unwrap();
         q.restore(snapshot.clone()).await.unwrap();
         assert_eq!(
-            q.execute(1, 1, &snapshot.tokens()[..1], vec![Value::Null; 2])
-                .await,
+            q.execute(1, 1, &snapshot.tokens()[..1]).await,
             Err(Error::Limit)
         );
     });
@@ -169,16 +162,16 @@ fn incompatible_forks_and_scope_overflow_fail() {
 fn size_limits_and_error_display() {
     block_on(async {
         let p = engine();
-        let huge = Value::String("x".repeat(MAX_BYTES));
-        assert_eq!(p.start(1, huge.clone()).await, Err(Error::Limit));
-        assert_eq!(p.snapshot(1).await, Err(Error::NotFound));
-        let root = p.start(1, Value::Null).await.unwrap();
-        let before = p.snapshot(1).await.unwrap();
+        assert_eq!(encode(&vec![0u8; MAX_BYTES]), Err(Error::Limit));
         assert_eq!(
-            p.execute(1, 0, &[root], vec![huge]).await,
+            p.start_marking(1, vec![0; MAX_TOKENS + 1]).await,
             Err(Error::Limit)
         );
-        assert_eq!(p.snapshot(1).await.unwrap(), before);
+        assert_eq!(
+            p.start_marking(1, vec![999]).await,
+            Err(Error::InvalidInputs)
+        );
+        assert_eq!(p.snapshot(1).await, Err(Error::NotFound));
         assert_eq!(
             Token::from_json(&" ".repeat(MAX_BYTES + 1)),
             Err(Error::Limit)
@@ -208,7 +201,7 @@ fn full_marking_rejects_growth_without_modification() {
             Shared::new(Authenticator::new([7; 32])),
         )
         .unwrap();
-        p.start(1, Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         let mut state = p.snapshot(1).await.unwrap().state;
         let root = state.tokens[0].claims.clone();
         state.tokens = (0..MAX_TOKENS as u64)
@@ -228,8 +221,7 @@ fn full_marking_rejects_growth_without_modification() {
         let snapshot = p.seal(state).unwrap();
         q.restore(snapshot.clone()).await.unwrap();
         assert_eq!(
-            q.execute(1, 0, &snapshot.tokens()[..1], vec![Value::Null; 2])
-                .await,
+            q.execute(1, 0, &snapshot.tokens()[..1]).await,
             Err(Error::Limit)
         );
         assert_eq!(q.snapshot(1).await.unwrap(), snapshot);
@@ -242,7 +234,7 @@ fn corrupted_archives_and_misrouted_revisions_are_rejected() {
     block_on(async {
         let cache = tiercache::Cache::new(vec![Box::new(tiercache::Lru::new(16))]);
         let p = engine();
-        p.start(1, Value::Null).await.unwrap();
+        p.start(1).await.unwrap();
         let snapshot = p.snapshot(1).await.unwrap();
         let key = p.archive_key(1, 99);
         cache
@@ -262,6 +254,36 @@ fn corrupted_archives_and_misrouted_revisions_are_rejected() {
         assert_eq!(
             p.read_archive(1, 99, &cache).await,
             Err(Error::InvalidSnapshot)
+        );
+    });
+}
+
+#[test]
+fn legacy_proof_version_and_mac_domain_cannot_be_reused() {
+    block_on(async {
+        let p = engine();
+        let token = p.start(1).await.unwrap();
+        assert_eq!(token.claims.version, 2);
+        let mut claims = token.claims.clone();
+        claims.version = 1;
+        let old_tag = p.auth.sign(b"petri-core/token/v1\0", &claims).unwrap();
+        assert_eq!(
+            p.verify_token(&Token {
+                claims,
+                tag: old_tag
+            }),
+            Err(Error::InvalidToken)
+        );
+        let old_tag = p
+            .auth
+            .sign(b"petri-core/token/v1\0", &token.claims)
+            .unwrap();
+        assert_eq!(
+            p.verify_token(&Token {
+                claims: token.claims,
+                tag: old_tag
+            }),
+            Err(Error::InvalidToken)
         );
     });
 }
