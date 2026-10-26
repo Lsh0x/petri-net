@@ -17,11 +17,11 @@ re-exported at the crate root.
 
 ## Installation
 
-The engine is introduced in version 0.2. Until that release is available, use Git:
+The authenticated engine is available in version 0.2:
 
 ```toml
 [dependencies]
-petri-core = { git = "https://github.com/Lsh0x/petri-net" }
+petri-core = "0.2"
 serde_json = "1"
 # The example uses futures' executor; production can use an existing runtime.
 futures = { version = "0.3", features = ["executor"] }
